@@ -37,7 +37,7 @@ assert abs(np.linalg.det(R) - 1.0) < 1e-6, "R doit être une rotation (det = +1)
 MODE_TEST_PIVOT = False
 
 # --- Position ----------------------------------------------------------
-SCALE = 12.0                 # 1 cm de main -> 16 cm de pince (tremblements aussi ×16)
+SCALE = 16.0                 # NON UTILISÉ : remplacé par les MODES (plus bas)
 # Boîte autour du point de départ, en mètres, axes de la base [x, y, z]
 # Elle ne sert plus qu'aux obstacles du labo : singularités et table ont leurs propres limites.
 BOX_MIN = np.array([-1.000, -1.000, -0.300])   # z (3e valeur) : descente max sous le départ
@@ -50,11 +50,11 @@ WORK_MAX_REACH = 1.10        # m : distance maxi épaule -> pointe (UR10e : 1,30
 WORK_MIN_RADIUS = 0.30       # m : distance mini à l'axe de la base (colonne centrale)
 SHOULDER_Z = 0.181           # m : hauteur de l'épaule du UR10e (plan UR : 180,7 mm)
 SAFETY_MARGIN = 0.005        # au-delà de la boîte + 5 mm : arrêt
-SPEED_START = 0.200          # vitesse max au lancement : 200 mm/s (modifiable avec + / -)
+SPEED_START = 0.200          # NON UTILISÉ : remplacé par les MODES (plus bas)
 SPEED_STEP = 0.020           # + / - : pas de 20 mm/s
 SPEED_MIN = 0.010            # 10 mm/s
 SPEED_MAX = 0.600            # vitesse la plus haute avec + : 600 mm/s (doit suivre SCALE)
-ACCEL_TIME = 0.2             # temps pour atteindre la vitesse max ou s'arrêter (s) : petit = plus vif
+ACCEL_TIME = 0.2             # NON UTILISÉ : remplacé par les MODES (plus bas)
 TRACK_MIN = 0.050            # écart consigne / réel toléré : au moins 50 mm
 TRACK_LAG = 1.0              # ... ou vitesse x 1 s si c'est plus grand
 
@@ -107,6 +107,16 @@ MAX_LOOP_DELAY = 0.05        # s : boucle plus lente que ça -> arrêt
 KEY_STEP = 0.002             # 2 mm par appui
 KEY_ROT = math.radians(2)    # 2° par appui
 HAND_LIMIT = 0.08            # m : course max de la main virtuelle
+
+# --- Modes de démo (touches 1, 2, 3 pendant la démo) ------------------
+# scale : 1 cm de main -> scale cm de pince | speed : vitesse au choix du mode (m/s)
+# speed_max : plafond de la touche + dans ce mode (<= SPEED_MAX) | accel_time : vivacité (s)
+MODES = {
+    ord('1'): dict(name="PRÉCISION", scale=4.0, speed=0.060, speed_max=0.150, accel_time=0.4),
+    ord('2'): dict(name="RAPIDE", scale=7.0, speed=0.300, speed_max=0.500, accel_time=0.3),
+    ord('3'): dict(name="GRANDE AMPLITUDE", scale=14.0, speed=0.400, speed_max=0.600, accel_time=0.3),
+}
+START_MODE = ord('1')        # mode au lancement : précision (le plus prudent)
 
 # --- Positions de départ ----------------------------------------------
 HOLD_HANDLE = True           # poignée omega tenue au centre tant que le suivi est OFF
@@ -571,6 +581,7 @@ def screen_lines(s):
     if g is not None:
         pince += {0: " (en mouvement)", 2: " - OBJET SAISI", 1: " - objet"}.get(g.obj, "")
     return [
+        f">>> MODE {s['mode']} (touches 1 / 2 / 3) | échelle ×{s['scale']:.0f} <<<",
         f"TÉLÉOP 6 AXES | {INPUT} | {ROBOT_IP} | log : {s['log_name']}"
         + ("  | MODE TEST PIVOT" if MODE_TEST_PIVOT else ""),
         f"Vitesse : {s['speed']*1000:3.0f} mm/s, {math.degrees(s['rot_speed']):3.0f} °/s (+/-)"
@@ -590,8 +601,8 @@ def screen_lines(s):
         f"Pince : {pince} (bouton omega : 1 appui = fermer / ouvrir)",
         "",
         s["note"],
-        "espace : suivi | bouton : pince | t : inclinaison | g : retour d'effort"
-        " | + - : vitesse | p : pince | x : quitter",
+        "1 précision | 2 rapide | 3 grande amplitude | espace : suivi | bouton : pince",
+        "t : inclinaison | g : retour d'effort | + - : vitesse | p : pince | x : quitter",
     ]
 
 
@@ -684,7 +695,10 @@ def main(screen):
         last_poll = 0.0
         pulse_start = pulse_until = -1.0
         note = "MODE TEST PIVOT : seule la vrille du stylo agit" if MODE_TEST_PIVOT else ""
-        speed = SPEED_START
+        mode = MODES[START_MODE]               # mode de démo actif
+        scale, speed = mode["scale"], mode["speed"]
+        speed_max, accel_time = mode["speed_max"], mode["accel_time"]
+        rebase = False                         # nouvelle photo de la main demandée (changement de mode)
         t0 = previous = last_draw = time.monotonic()
 
         while True:
@@ -698,8 +712,14 @@ def main(screen):
             # --- 8e. Clavier ----------------------------------------------
             k = screen.getch()
             while k != -1:
-                if k in (ord('+'), ord('=')):
-                    speed = min(SPEED_MAX, speed + SPEED_STEP)
+                if k in MODES:                            # changement de mode de démo
+                    mode = MODES[k]
+                    scale, speed = mode["scale"], mode["speed"]
+                    speed_max, accel_time = mode["speed_max"], mode["accel_time"]
+                    rebase = True                         # pas de saut : on repart de la main actuelle
+                    note = f"Mode {mode['name']} : échelle ×{scale:.0f}, {speed*1000:.0f} mm/s"
+                elif k in (ord('+'), ord('=')):
+                    speed = min(speed_max, SPEED_MAX, speed + SPEED_STEP)
                 elif k == ord('-'):
                     speed = max(SPEED_MIN, speed - SPEED_STEP)
                 elif k == ord(' '):
@@ -718,7 +738,7 @@ def main(screen):
                 else:
                     hand.key(k)
                 k = screen.getch()
-            accel = speed / ACCEL_TIME
+            accel = speed / accel_time
             track_limit = max(TRACK_MIN, TRACK_LAG * speed)
 
             # --- 8f. Lectures et surveillance -----------------------------
@@ -759,10 +779,14 @@ def main(screen):
 
             # --- 8i. Embrayage : photos de départ à chaque appui sur espace
             if follow and not active:
+                rebase = False
                 hand.release()                     # la poignée devient libre
                 previous = time.monotonic()
                 hand_ref, robot_ref, vel, active = p_hand, cmd.copy(), np.zeros(3), True
                 hand_rot_ref = None
+            elif rebase and active:                # changement de mode pendant le suivi
+                hand_ref, robot_ref = p_hand, cmd.copy()   # nouvelle photo, la vitesse continue
+                rebase = False
             elif not follow and active:
                 active, vel = False, np.zeros(3)
                 if HOLD_HANDLE:
@@ -776,7 +800,7 @@ def main(screen):
                 d_tilt, twist = split_hand_gesture(r_hand, hand_rot_ref)
 
                 if not MODE_TEST_PIVOT:            # en mode test : position et inclinaison figées
-                    goal = clip_workspace(np.clip(robot_ref + SCALE * R @ (p_hand - hand_ref),
+                    goal = clip_workspace(np.clip(robot_ref + scale * R @ (p_hand - hand_ref),
                                                   start_box_min, start_box_max))
                     cmd, vel = compute_position(cmd, vel, goal, speed, accel, slow)
                     cmd = clip_workspace(cmd)
@@ -813,7 +837,8 @@ def main(screen):
                     speed=speed, rot_speed=rot_speed, rot_on=rot_on, active=active,
                     fb_on=fb_on, fb_gain=fb_gain, f_filt=f_filt, f_hand=f_hand,
                     error=error, track_limit=track_limit, ang_cmd=ang_cmd,
-                    rot_error=rot_error, twist=twist, spin=spin, note=note)))
+                    rot_error=rot_error, twist=twist, spin=spin, note=note,
+                    mode=mode["name"], scale=scale)))
                 last_draw = now
 
             control.waitPeriod(t_cycle)
